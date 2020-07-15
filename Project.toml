@@ -1,0 +1,4 @@
+name = "REPLMaker"
+uuid = "5680ecab-fe21-44f9-b193-acfd91bde30a"
+authors = ["TommyXR <tommy.xavier.robillard@gmail.com>"]
+version = "0.1.0"
