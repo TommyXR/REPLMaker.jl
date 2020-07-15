@@ -1,14 +1,100 @@
 module REPLMaker
 
-export generate_custom_repl, add_repl!
+export generate_custom_repl, add_repl_mode!, add_repl_mode, register!
 
 using REPL
 import REPL: REPL, LineEdit, REPLCompletions
 
 
-
-mutable struct CusREPLCompletionProvider{T} <: LineEdit.CompletionProvider
+mutable struct CusREPLCompletionProvider <: LineEdit.CompletionProvider
+    glossary::Dict{String, Function}
 end
+
+CusREPLCompletionProvider() = CusREPLCompletionProvider(Dict())
+
+
+function parse_status(glossary, script::String)
+
+    tokens = split(script, r"\s+")
+
+    command = try
+        glossary[tokens[1]]
+    catch e
+        e isa KeyError && return :error
+        throw(e)
+    end
+
+        
+    return :ok
+end
+
+function repl_eval(script::String, stdout::IO, stderr::IO, glossary)
+    tokens = split(script, r"\s+")
+
+    try
+        command = glossary[tokens[1]]
+        command(tokens[2:end]...)
+
+    
+    catch e
+        if e isa KeyError
+            println(stderr, "Command not recognized")
+        else
+            showerror(stderr, e)
+        end
+
+    end
+
+end
+
+
+function LineEdit.complete_line(c::CusREPLCompletionProvider, s)
+    buf = s.input_buffer
+    partial = String(buf.data[1:buf.ptr-1])
+
+    full = LineEdit.input_string(s)
+
+    ret, range, should_complete = REPLCompletions.bslash_completions(full, lastindex(partial))[2]
+
+    if length(ret) > 0 && should_complete
+        return map(REPLCompletions.completion_text, ret), partial[range], should_complete
+    end
+    
+    tokens = split(partial, r"\s+")
+    tocomplete = tokens[1]
+
+    matches = filter(keys(c.glossary)) do v
+        startswith(v, tocomplete)
+    end
+
+
+    if length(matches) > 0
+        return matches |> collect, "sting", false
+    end
+
+    
+
+    return String[], 0:-1, false
+end
+
+
+function register!(repl::LineEdit.Prompt, commands::Dict{String, T} where T <: Function)
+    if !isa(repl.complete, CusREPLCompletionProvider)
+        throw(TypeError(:register!, "repl", CusREPLCompletionProvider, typeof(repl.complete)))
+    end
+
+    merge!(repl.complete.glossary, commands)
+    
+    return nothing
+end
+
+function register!(repl::LineEdit.Prompt, p::Pair{String, T} where T <: Function)
+    register!(repl, Dict(p))
+end
+
+
+
+
 
 
 
@@ -44,8 +130,43 @@ function generate_custom_repl(prompt; prompt_prefix="", prompt_suffix="", sticky
     end
 
 
-    custom_mode.on_enter = jl_repl.on_enter
-    custom_mode.on_done = jl_repl.on_done
+    custom_mode.on_enter = s -> begin
+        status = parse_status(completion.glossary, String(take!(copy(LineEdit.buffer(s)))))
+
+        status == :ok || status == :error
+    end
+
+
+    custom_mode.on_done = (s, buffer, ok) -> begin
+        if !ok
+            return REPL.transition(s, :abort)
+        end
+
+       script = String(take!(buffer)) 
+
+       if !isempty(strip(script))
+            REPL.reset(Base.active_repl)
+
+            try
+                repl_eval(
+                    script,
+                    Base.active_repl.t.out_stream,
+                    Base.active_repl.t.err_stream,
+                    completion.glossary)
+
+            catch y
+                Base.with_output_color(:red, stderr) do io
+                    print(io, "ERROR: ")
+                    showerror(io, y)
+                    println(stderr)
+                end
+            end
+
+       end
+       REPL.prepare_next(Base.active_repl)
+       REPL.reset_state(s)
+       s.current_mode.sticky || REPL.transition(s, jl_repl)
+    end
 
 
     search_prompt, skeymap = LineEdit.setup_search_keymap(hist)
